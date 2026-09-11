@@ -1731,24 +1731,27 @@ emptyEl.hidden = false;
 loadImage("shot.png", "shot.png");       // the scan that ships with this folder
 requestAnimationFrame(loop);
 
-// real-time recorder check: <img src="/slow"> keeps the load event pending
 S.flow = 3; S.turn = 40;
 const out = [];
+const show = () => {
+  const box = document.createElement("div");
+  box.style.cssText = "position:fixed;inset:0;z-index:99;background:#000;color:#0f0;font:13px monospace;padding:16px;white-space:pre-wrap";
+  box.textContent = out.join("\n");
+  document.body.appendChild(box);
+};
 window.download = (blob, name) => {
-  const fr = new FileReader();
-  fr.onload = () => {
-    const b = new Uint8Array(fr.result);
-    const hex = [...b].map(x => x.toString(16).padStart(2,"0")).join(" ");
-    const ascii = [...b].map(x => (x>31 && x<127) ? String.fromCharCode(x) : ".").join("");
-    out.push("file:  " + name, "type:  " + blob.type, "bytes: " + blob.size,
-             "hex:   " + hex, "ascii: " + ascii,
-             "hud:   " + document.getElementById("hud").textContent);
-    const box = document.createElement("div");
-    box.style.cssText = "position:fixed;inset:0;z-index:99;background:#000;color:#0f0;font:12px monospace;padding:16px;white-space:pre-wrap;word-break:break-all";
-    box.textContent = out.join("\n");
-    document.body.appendChild(box);
+  out.push("file:  " + name, "type:  " + blob.type, "bytes: " + blob.size);
+  const v = document.createElement("video");
+  v.muted = true;
+  v.src = URL.createObjectURL(blob);
+  v.onloadedmetadata = () => {
+    out.push("DECODES BACK: " + v.videoWidth + "x" + v.videoHeight +
+             "  duration=" + (isFinite(v.duration) ? v.duration.toFixed(2) + "s" : "streaming"));
+    v.currentTime = 0.2;
+    v.onseeked = () => { out.push("seek ok, frame at " + v.currentTime.toFixed(2) + "s"); show(); };
+    setTimeout(show, 1200);
   };
-  fr.readAsArrayBuffer(blob.slice(0, 24));
+  v.onerror = () => { out.push("DECODE FAILED: " + (v.error && v.error.message)); show(); };
 };
 setTimeout(() => { toggleRecord(); setTimeout(toggleRecord, 3000); }, 1200);
 </script>
