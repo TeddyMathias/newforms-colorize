@@ -4,13 +4,47 @@
   <meta charset="utf-8">
   <title>Pixel Recolor</title>
   <style>
-    body { margin: 0; background: #ffffff; }
+    body { margin: 0; background: #ffffff; font-family: Georgia, serif; }
     canvas { display: block; max-width: 100%; }
+    .capture-bar {
+      position: fixed;
+      z-index: 1;
+      top: 16px;
+      right: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid #1b1b1b;
+      border-radius: 6px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+      backdrop-filter: blur(8px);
+    }
+    button {
+      min-height: 36px;
+      padding: 0 12px;
+      color: #ffffff;
+      background: #1b1b1b;
+      border: 1px solid #1b1b1b;
+      border-radius: 4px;
+      font: 700 13px Georgia, serif;
+      cursor: pointer;
+    }
+    button:hover { background: #3b3b3b; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    #recordButton[data-recording="true"] { background: #c52b2b; border-color: #c52b2b; }
+    #captureStatus { min-width: 72px; color: #1b1b1b; font-size: 12px; }
   </style>
 </head>
 <body>
 
 <canvas id="canvas"></canvas>
+<div class="capture-bar" aria-label="Capture controls">
+  <button id="imageButton" type="button" disabled>Save PNG</button>
+  <button id="recordButton" type="button" disabled>Record video</button>
+  <span id="captureStatus">Loading...</span>
+</div>
 
 <script>
 // =====================================================
@@ -18,18 +52,18 @@
 // =====================================================
 
 // 1. Your scanned image. Keep it in the same folder as this file.
-const IMAGE_FILE = "my-scan.jpg";
+const IMAGE_FILE = "shot.webp";
 
 // 2. Your palette (up to 5 colors). Use any hex color, e.g. "#ff0055".
 //    Try https://coolors.co to pick colors.
 const PALETTE = ["#ff3366", "#ffcc00", "#00ccff", "#33ff99", "#9933ff"];
 
 // 3. Random colors instead of the palette?  true or false
-const USE_RANDOM_COLORS = false;
+const USE_RANDOM_COLORS = true;
 
 // 4. How many pixels get painted before switching to the next color.
 //    Small numbers (1–50) = noisy / confetti.  Big numbers (5000+) = wide bands.
-const PIXELS_PER_COLOR = 2000;
+const PIXELS_PER_COLOR = 200;
 
 // 5. Rate of change: milliseconds between color shifts. Lower = faster.
 //    1000 = once per second.  0 = never animate (still image).
@@ -45,11 +79,16 @@ const WHITE_THRESHOLD = 200;
 
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
+const imageButton = document.getElementById("imageButton");
+const recordButton = document.getElementById("recordButton");
+const captureStatus = document.getElementById("captureStatus");
 const img = new Image();
 img.src = IMAGE_FILE;
 
 let original;    // the untouched pixels from the scan
 let offset = 0;  // shifts which color starts first — this is what animates
+let recorder;
+let recordedChunks = [];
 
 img.onload = function () {
   canvas.width = img.width;
@@ -59,7 +98,60 @@ img.onload = function () {
 
   paint();
   if (SPEED > 0) setInterval(paint, SPEED);
+  imageButton.disabled = false;
+  recordButton.disabled = typeof canvas.captureStream !== "function" || typeof MediaRecorder === "undefined";
+  captureStatus.textContent = `${canvas.width} x ${canvas.height}`;
 };
+
+imageButton.addEventListener("click", function () {
+  canvas.toBlob(function (blob) {
+    if (blob) downloadBlob(blob, `colorization-${timestamp()}.png`);
+  }, "image/png");
+});
+
+recordButton.addEventListener("click", function () {
+  if (recorder && recorder.state === "recording") {
+    recorder.stop();
+    return;
+  }
+
+  const stream = canvas.captureStream(30);
+  const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+    ? "video/webm;codecs=vp9"
+    : "video/webm";
+
+  recordedChunks = [];
+  recorder = new MediaRecorder(stream, {
+    mimeType,
+    videoBitsPerSecond: 20000000
+  });
+  recorder.addEventListener("dataavailable", function (event) {
+    if (event.data.size > 0) recordedChunks.push(event.data);
+  });
+  recorder.addEventListener("stop", function () {
+    stream.getTracks().forEach(function (track) { track.stop(); });
+    downloadBlob(new Blob(recordedChunks, { type: mimeType }), `colorization-${timestamp()}.webm`);
+    recordButton.textContent = "Record video";
+    recordButton.dataset.recording = "false";
+    captureStatus.textContent = `${canvas.width} x ${canvas.height}`;
+  });
+  recorder.start();
+  recordButton.textContent = "Stop & save";
+  recordButton.dataset.recording = "true";
+  captureStatus.textContent = "Recording";
+});
+
+function downloadBlob(blob, filename) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  setTimeout(function () { URL.revokeObjectURL(link.href); }, 1000);
+}
+
+function timestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
 
 // Turn "#ff3366" into [255, 51, 102]
 function hexToRGB(hex) {
