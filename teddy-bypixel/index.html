@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Pixel Recolor</title>
+  <style>
+    body { margin: 0; background: #ffffff; }
+    canvas { display: block; max-width: 100%; }
+  </style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<script>
+// =====================================================
+//  SETTINGS  —  change these and refresh the browser
+// =====================================================
+
+// 1. Your scanned image. Keep it in the same folder as this file.
+const IMAGE_FILE = "my-scan.jpg";
+
+// 2. Your palette (up to 5 colors). Use any hex color, e.g. "#ff0055".
+//    Try https://coolors.co to pick colors.
+const PALETTE = ["#ff3366", "#ffcc00", "#00ccff", "#33ff99", "#9933ff"];
+
+// 3. Random colors instead of the palette?  true or false
+const USE_RANDOM_COLORS = false;
+
+// 4. How many pixels get painted before switching to the next color.
+//    Small numbers (1–50) = noisy / confetti.  Big numbers (5000+) = wide bands.
+const PIXELS_PER_COLOR = 2000;
+
+// 5. Rate of change: milliseconds between color shifts. Lower = faster.
+//    1000 = once per second.  0 = never animate (still image).
+const SPEED = 500;
+
+// 6. How bright a pixel must be (0–255) to count as "white" and stay white.
+//    Lower = more of the paper turns to color.  Higher = only pure white survives.
+const WHITE_THRESHOLD = 200;
+
+// =====================================================
+//  THE CODE  —  read it, then break it on purpose
+// =====================================================
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const img = new Image();
+img.src = IMAGE_FILE;
+
+let original;    // the untouched pixels from the scan
+let offset = 0;  // shifts which color starts first — this is what animates
+
+img.onload = function () {
+  canvas.width = img.width;
+  canvas.height = img.height;
+  ctx.drawImage(img, 0, 0);
+  original = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+  paint();
+  if (SPEED > 0) setInterval(paint, SPEED);
+};
+
+// Turn "#ff3366" into [255, 51, 102]
+function hexToRGB(hex) {
+  return [
+    parseInt(hex.slice(1, 3), 16),
+    parseInt(hex.slice(3, 5), 16),
+    parseInt(hex.slice(5, 7), 16)
+  ];
+}
+
+function randomColor() {
+  return [Math.random() * 255, Math.random() * 255, Math.random() * 255];
+}
+
+function paint() {
+  // Copy the original so we always start fresh
+  const frame = new ImageData(new Uint8ClampedArray(original.data), original.width, original.height);
+  const pixels = frame.data;   // one long array: r, g, b, a, r, g, b, a, ...
+
+  const palette = PALETTE.map(hexToRGB);
+  let color = USE_RANDOM_COLORS ? randomColor() : palette[offset % palette.length];
+  let count = 0;   // how many pixels painted with the current color
+  let which = offset;
+
+  // Walk through the buffer, four numbers (one pixel) at a time
+  for (let i = 0; i < pixels.length; i += 4) {
+    const r = pixels[i];
+    const g = pixels[i + 1];
+    const b = pixels[i + 2];
+    const brightness = (r + g + b) / 3;
+
+    if (brightness > WHITE_THRESHOLD) {
+      // Close to white → make it pure white
+      pixels[i] = 255; pixels[i + 1] = 255; pixels[i + 2] = 255;
+    } else {
+      // Black, gray, or any color → paint it with the current color
+      pixels[i] = color[0]; pixels[i + 1] = color[1]; pixels[i + 2] = color[2];
+    }
+
+    // Time to switch colors?
+    count++;
+    if (count >= PIXELS_PER_COLOR) {
+      count = 0;
+      which++;
+      color = USE_RANDOM_COLORS ? randomColor() : palette[which % palette.length];
+    }
+  }
+
+  ctx.putImageData(frame, 0, 0);
+  offset++;   // next frame starts one color further along
+}
+
+// IDEAS TO TRY
+// - Change PIXELS_PER_COLOR to canvas.width so each row gets its own color.
+// - Make brightness use only the red channel:  const brightness = r;
+// - Instead of pure white, keep the paper texture: delete the three "= 255" lines.
+// - Blend instead of replace:  pixels[i] = (r + color[0]) / 2;
+</script>
+
+</body>
+</html>
