@@ -136,6 +136,8 @@ const S = {
   autofit: true,
   mirror: true,
   exportScale: 2,
+  frame: 1,          // 0 = what the viewport shows, 1 = the source's own size
+  behind: 0,         // 0 = alpha, 1 = black, 2 = workspace grey
 
   // live
   tool: "recolor",
@@ -158,7 +160,7 @@ const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", {
   antialias: false,
   preserveDrawingBuffer: true,
-  alpha: false
+  alpha: true
 });
 if (!gl) alert("This browser has no WebGL2. Try Chrome, Safari 15+, or Firefox.");
 
@@ -193,6 +195,7 @@ uniform int   u_count;
 uniform float u_random;
 uniform vec3  u_paper;
 uniform vec3  u_bg;
+uniform float u_bgA;
 uniform float u_phase;
 uniform float u_spiral;
 uniform float u_turn;          // the whole colour field, swung round
@@ -355,7 +358,7 @@ void main() {
   vec2 uv = qp / u_texSize;
   uv.x = mix(uv.x, 1.0 - uv.x, u_mirror);
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-    outColor = vec4(u_bg, 1.0);
+    outColor = vec4(u_bg * u_bgA, u_bgA);     // premultiplied, so 0 means clear
     return;
   }
 
@@ -760,15 +763,34 @@ function commitStroke() {
    4. VIEWPORTS — one canvas, many screens
    --------------------------------------------------------------- */
 
+const WORKSPACE = [0.169, 0.169, 0.169];
+
+/* dest: "screen" always shows the workspace; stills may be transparent;
+   H.264 has no alpha, so video falls back to black. */
+function backdrop(dest) {
+  if (dest === "screen" || S.behind === 2) return { c: WORKSPACE, a: 1 };
+  if (S.behind === 1 || dest === "video") return { c: [0, 0, 0], a: 1 };
+  return { c: [0, 0, 0], a: 0 };
+}
+
 const GRIDS = { 1: [1, 1], 2: [2, 1], 3: [3, 1], 4: [2, 2], 6: [3, 2] };
 let views = [];
 let dpr = 1;
 
-function layout(mult) {
+/* the canvas size an export wants: every screen holding the source 1:1 */
+function exportSize(mult) {
+  const [cols, rows] = GRIDS[S.screens] || GRIDS[1];
+  let w = texW * cols * mult, h = texH * rows * mult;
+  const cap = Math.min(gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096, 16384);
+  const k = Math.min(1, cap / Math.max(w, h));
+  return { w: Math.max(1, Math.round(w * k)), h: Math.max(1, Math.round(h * k)), k: k * mult };
+}
+
+function layout(mult, noGap) {
   mult = mult || 1;
   const [cols, rows] = GRIDS[S.screens] || GRIDS[1];
   const W = canvas.width, H = canvas.height;
-  const gap = S.screens > 1 ? Math.round(2 * dpr * mult) : 0;
+  const gap = (S.screens > 1 && !noGap) ? Math.round(2 * dpr * mult) : 0;
   const vw = (W - gap * (cols - 1)) / cols;
   const vh = (H - gap * (rows - 1)) / rows;
   views = [];
@@ -785,6 +807,7 @@ function layout(mult) {
 }
 
 function resize() {
+  if (recording) return;                  // the buffer belongs to the recording
   dpr = Math.min(window.devicePixelRatio || 1, 2);
   const r = stage.getBoundingClientRect();
   const w = Math.max(1, Math.round(r.width * dpr));
@@ -824,15 +847,19 @@ function pressInImage() {
   return [q[0], q[1], S.press, 1];
 }
 
-function render(mult) {
-  mult = mult || 1;
+function render(o) {
+  o = (typeof o === "number") ? { mult: o } : (o || {});
+  const mult = o.mult || 1;
+  const dest = o.dest || "screen";
+  const toSource = dest !== "screen" && S.frame === 1;   // frame the source, not the view
+  const bg = backdrop(dest);
   gl.useProgram(prog);
   gl.bindVertexArray(vao);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, tex);
   gl.uniform1i(u("u_tex"), 0);
 
-  gl.clearColor(0.169, 0.169, 0.169, 1);
+  gl.clearColor(bg.c[0] * bg.a, bg.c[1] * bg.a, bg.c[2] * bg.a, bg.a);
   gl.clear(gl.COLOR_BUFFER_BIT);
 
   // palette
@@ -844,7 +871,8 @@ function render(mult) {
   gl.uniform3fv(u("u_palette"), palBuf);
   gl.uniform1i(u("u_count"), n);
   gl.uniform3fv(u("u_paper"), hexRGB(S.paper));
-  gl.uniform3fv(u("u_bg"), [0.169, 0.169, 0.169]);
+  gl.uniform3fv(u("u_bg"), bg.c);
+  gl.uniform1f(u("u_bgA"), bg.a);
 
   // ripples
   rippleBuf.fill(0);
@@ -901,12 +929,13 @@ function render(mult) {
   for (let i = 0; i < views.length; i++) {
     const v = views[i];
     const k = i * S.variation;                     // how far this screen drifts
-    const sc = viewScale(v) * mult;
+    // framing the source means one device pixel per source pixel, no pan, no zoom
+    const sc = toSource ? (o.unit || mult) : viewScale(v) * mult;
 
     gl.viewport(v.x, v.y, v.w, v.h);
     gl.uniform4f(u("u_view"), v.x, v.y, v.w, v.h);
     gl.uniform1f(u("u_scale"), sc);
-    gl.uniform2f(u("u_pan"), S.panX * sc, S.panY * sc);
+    gl.uniform2f(u("u_pan"), toSource ? 0 : S.panX * sc, toSource ? 0 : S.panY * sc);
     gl.uniform1f(u("u_angle"), S.angle * DEG + k * 0.55);
     gl.uniform1f(u("u_phase"), S.phase + k * 2.3);
     gl.uniform1f(u("u_hue"), S.hue + k * 0.11);
@@ -932,7 +961,7 @@ function loop(now) {
 
   pumpCam();
   if (S.autofit) { S.zoom = 1; S.panX = 0; S.panY = 0; }
-  if (hasSource) render();
+  if (hasSource) render(recording || undefined);
 
   frames++;
   if (now - fpsClock > 500) {
@@ -966,10 +995,17 @@ function updateHUD() {
    6. POINTER — click anywhere, the colors move
    --------------------------------------------------------------- */
 
-function viewAt(clientX, clientY) {
+/* the drawing buffer is not always the CSS size — while recording it is the
+   source's size — so always measure the ratio rather than trusting dpr */
+function canvasPoint(clientX, clientY) {
   const r = canvas.getBoundingClientRect();
-  const px = (clientX - r.left) * dpr;
-  const pyGL = canvas.height - (clientY - r.top) * dpr;
+  const sx = canvas.width / Math.max(r.width, 1);
+  const sy = canvas.height / Math.max(r.height, 1);
+  return [(clientX - r.left) * sx, canvas.height - (clientY - r.top) * sy, sx];
+}
+
+function viewAt(clientX, clientY) {
+  const [px, pyGL] = canvasPoint(clientX, clientY);
   return views.find(v => px >= v.x && px <= v.x + v.w && pyGL >= v.y && pyGL <= v.y + v.h)
       || views[0];
 }
@@ -977,10 +1013,8 @@ function viewAt(clientX, clientY) {
 function screenToImage(clientX, clientY, v) {
   v = v || viewAt(clientX, clientY);
   if (!v) return null;
-  const r = canvas.getBoundingClientRect();
-  const px = (clientX - r.left) * dpr;
-  const pyGL = canvas.height - (clientY - r.top) * dpr;
-  const sc = viewScale(v);
+  const [px, pyGL] = canvasPoint(clientX, clientY);
+  const sc = recording ? recording.unit : viewScale(v);
   let cx = px - v.x - v.w / 2 - S.panX * sc;
   let cy = pyGL - v.y - v.h / 2 - S.panY * sc;
   return [cx / sc + texW / 2, cy / sc + texH / 2];
@@ -1021,7 +1055,8 @@ canvas.addEventListener("pointerdown", e => {
   const q = screenToImage(e.clientX, e.clientY, v);
 
   if (S.tool === "move" || e.button === 1 || spaceDown) {
-    dragging = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY, v };
+    dragging = { x: e.clientX, y: e.clientY, panX: S.panX, panY: S.panY, v,
+                 ratio: canvasPoint(e.clientX, e.clientY)[2] };
     stage.classList.add("dragging");
     S.autofit = false;
     return;
@@ -1043,8 +1078,8 @@ canvas.addEventListener("pointerdown", e => {
 canvas.addEventListener("pointermove", e => {
   if (dragging) {
     const sc = viewScale(dragging.v);
-    S.panX = dragging.panX + (e.clientX - dragging.x) * dpr / sc;
-    S.panY = dragging.panY - (e.clientY - dragging.y) * dpr / sc;
+    S.panX = dragging.panX + (e.clientX - dragging.x) * dragging.ratio / sc;
+    S.panY = dragging.panY - (e.clientY - dragging.y) * dragging.ratio / sc;
     return;
   }
   if (stroke) {
@@ -1264,6 +1299,8 @@ const SPEC = [
   ]},
 
   { title: "Export", open: true, rows: [
+    { t: "seg", k: "frame", label: "Frame", opts: [[1, "Source size"], [0, "Viewport"]] },
+    { t: "seg", k: "behind", label: "Behind", opts: [[0, "Alpha"], [1, "Black"], [2, "Gray"]] },
     { t: "seg", k: "exportScale", label: "Resolution", opts: [[1, "1×"], [2, "2×"], [4, "4×"], [8, "8×"]] },
     { t: "actions", items: [
       ["Save PNG", () => savePNG()],
@@ -1272,7 +1309,7 @@ const SPEC = [
     { t: "actions", items: [
       ["Record video", () => toggleRecord(), "recBtn"]
     ]},
-    { t: "hint", html: "PNG and SVG both export at the chosen multiple of the canvas. <b>SVG</b> traces the colored blocks as real vectors, so it stays sharp at any size — keep <b>Blend</b> at 0 for the cleanest file. Video records at screen size, 60fps, as <b>MP4 / H.264</b> — ready to drop into any editor. Browsers cannot write .mov, and fall back to WebM only if they have no MP4 encoder." }
+    { t: "hint", html: "<b>Source size</b> writes at the input's own pixel dimensions, one for one — the pixelated edge is kept as it falls, over alpha or black. <b>Viewport</b> exports what you see instead, times the resolution. Video is <b>MP4 / H.264</b> at 60fps, capped at 4K and always on black, since H.264 has no alpha. <b>SVG</b> stays sharp at any size — keep <b>Blend</b> at 0 for the cleanest file." }
   ]},
 
   { title: "Shapes", open: false, rows: [
@@ -1533,26 +1570,47 @@ function download(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
+/* Put the canvas into export shape, run `fn`, then put everything back.
+   Source framing sizes the canvas to the artwork itself, so a 7680x4320
+   scan comes out 7680x4320 — jagged pixel edge and all, over whatever
+   the Behind setting says. */
+function withExport(dest, fn) {
+  const W0 = canvas.width, H0 = canvas.height;
+  const restore = () => {
+    canvas.width = W0; canvas.height = H0;
+    layout(); render();
+  };
+  let size, unit;
+  if (S.frame === 1) {
+    const e = exportSize(dest === "svg" ? 1 : S.exportScale);
+    size = e; unit = e.k;
+  } else {
+    const m = dest === "svg" ? 1 : S.exportScale;
+    size = { w: W0 * m, h: H0 * m }; unit = m;
+  }
+  canvas.width = size.w; canvas.height = size.h;
+  layout(S.frame === 1 ? 1 : (dest === "svg" ? 1 : S.exportScale), S.frame === 1);
+  render({ dest, mult: unit, unit });
+  return fn(size, unit, restore);
+}
+
 function savePNG() {
   if (!hasSource) return;
-  const m = S.exportScale;
-  const maxDim = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 4096;
-  const w = canvas.width, h = canvas.height;
-  const mult = Math.min(m, Math.floor(maxDim / Math.max(w, h)) || 1);
-  canvas.width = w * mult;
-  canvas.height = h * mult;
-  layout(mult);
-  render(mult);
-  const restore = () => { canvas.width = w; canvas.height = h; layout(); render(); };
-  try {
-    canvas.toBlob(blob => {
-      if (blob) download(blob, `bypixel-${stamp()}-${mult}x.png`);
+  withExport("png", (size, unit, restore) => {
+    try {
+      canvas.toBlob(blob => {
+        if (blob) {
+          download(blob, `bypixel-${stamp()}.png`);
+          note(`PNG · ${size.w}×${size.h} · ${["alpha", "black", "workspace"][S.behind]} · ` +
+               `${Math.round(blob.size / 1024)} KB`);
+        }
+        restore();
+      }, "image/png");
+    } catch (err) {
       restore();
-    }, "image/png");
-  } catch (err) {
-    restore();
-    alert("Export needs the page served over http — open the folder with Live Server, not as a file.");
-  }
+      alert("Export needs the page served over http — open the folder with Live Server, not as a file.");
+    }
+  });
 }
 document.getElementById("btnPng").onclick = savePNG;
 
@@ -1568,28 +1626,17 @@ function saveSVG() {
   if (!hasSource) return;
   const W0 = canvas.width, H0 = canvas.height;
 
-  // Resolution only decides how big the SVG prints — it is vector, so there is
-  // nothing to gain from reading back a huge frame. We sample just finely
-  // enough that every pixel block is caught, and no finer.
-  const blockNow = Math.max(0.25, S.pixel * viewScale(views[0]));
-  let mult = Math.max(1, Math.min(4, Math.ceil(3 / blockNow)));
-  while (mult > 1 && (W0 * mult) * (H0 * mult) > 24e6) mult--;
-
-  canvas.width = W0 * mult;
-  canvas.height = H0 * mult;
-  layout(mult);
-  render(mult);
-
-  const W = canvas.width, H = canvas.height;
-  const buf = new Uint8Array(W * H * 4);
-  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
-
-  canvas.width = W0; canvas.height = H0;     // put the view back straight away
-  layout();
-  render();
+  const out = withExport("svg", (size, unit, restore) => {
+    const W = canvas.width, H = canvas.height;
+    const buf = new Uint8Array(W * H * 4);
+    gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+    restore();
+    return { W, H, buf, unit };
+  });
+  const { W, H, buf, unit } = out;
 
   // about two samples across every pixel block, and never a silly total
-  const blockPx = Math.max(1, S.pixel * viewScale(views[0]) * mult);
+  const blockPx = Math.max(1, S.pixel * (S.frame === 1 ? unit : viewScale(views[0])));
   let step = Math.max(1, Math.round(blockPx / 2));
   while ((W / step) * (H / step) > 400000) step++;
 
@@ -1600,7 +1647,8 @@ function saveSVG() {
   // painted with a real sampled colour, so flat areas keep your exact hex.
   const snap = c => (c + 4) >> 3;
   const keyOf = (r, g, b) => (snap(r) << 10) | (snap(g) << 5) | snap(b);
-  const bgKey = keyOf(43, 43, 43);
+  const CLEAR = -1;
+  const bgKey = S.frame === 1 ? CLEAR : keyOf(43, 43, 43);
   const trueColor = new Map();
 
   const line = new Int32Array(cols);
@@ -1613,8 +1661,8 @@ function saveSVG() {
     const rowBase = gy * W * 4;
     for (let c = 0; c < cols; c++) {
       const i = rowBase + (c * step + half) * 4;
-      const k = keyOf(buf[i], buf[i + 1], buf[i + 2]);
-      if (!trueColor.has(k))
+      const k = buf[i + 3] < 128 ? CLEAR : keyOf(buf[i], buf[i + 1], buf[i + 2]);
+      if (k !== CLEAR && !trueColor.has(k))
         trueColor.set(k, ((buf[i] << 16) | (buf[i + 1] << 8) | buf[i + 2])
                           .toString(16).padStart(6, "0"));
       line[c] = k;
@@ -1640,7 +1688,7 @@ function saveSVG() {
   const byColor = new Map();
   let kept = 0;
   for (const t of rects) {
-    if (t.k === bgKey) continue;                     // the workspace behind the art
+    if (t.k === CLEAR || t.k === bgKey) continue;    // nothing behind the art
     const x = t.a * step, y = t.y * step;
     const w = (t.b - t.a) * step, h = t.h * step;
     let d = byColor.get(t.k);
@@ -1653,11 +1701,13 @@ function saveSVG() {
   for (const [k, d] of byColor)
     paths.push(`<path fill="#${trueColor.get(k)}" d="${d.join("")}"/>`);
 
-  const outW = Math.round(W0 * S.exportScale), outH = Math.round(H0 * S.exportScale);
+  const scale = S.frame === 1 ? (S.exportScale / Math.max(unit, 0.0001)) : S.exportScale;
+  const outW = Math.round(W * scale), outH = Math.round(H * scale);
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${outW}" height="${outH}" ` +
     `viewBox="0 0 ${W} ${H}" shape-rendering="crispEdges">\n` +
-    `<rect width="${W}" height="${H}" fill="#2b2b2b"/>\n` +
+    (S.behind === 2 ? `<rect width="${W}" height="${H}" fill="#2b2b2b"/>\n` :
+     S.behind === 1 ? `<rect width="${W}" height="${H}" fill="#000000"/>\n` : "") +
     paths.join("\n") + `\n</svg>\n`;
 
   const blob = new Blob([svg], { type: "image/svg+xml" });
@@ -1688,7 +1738,47 @@ function makeRecorder(stream) {
   return null;
 }
 
-let recorder = null, chunks = [];
+let recorder = null, chunks = [], recording = null;
+
+/* Recording writes at the source's own size. The drawing buffer becomes that
+   size for the duration, and the canvas element is letterboxed inside the
+   stage so the preview still shows exactly what is being written. */
+function beginRecordFrame() {
+  const VIDEO_CAP = 3840;                       // H.264 encoders get unhappy past 4K
+  let w, h, unit;
+  if (S.frame === 1) {
+    const e = exportSize(1);
+    w = e.w; h = e.h; unit = e.k;
+  } else {
+    w = canvas.width; h = canvas.height; unit = 1;
+  }
+  const k = Math.min(1, VIDEO_CAP / Math.max(w, h));
+  // H.264 wants even dimensions; round down so the file is never larger
+  // than the source it came from
+  w = Math.max(2, Math.floor(w * k / 2) * 2);
+  h = Math.max(2, Math.floor(h * k / 2) * 2);
+
+  recording = { dest: "video", mult: unit * k, unit: unit * k, w0: canvas.width, h0: canvas.height };
+  canvas.width = w; canvas.height = h;
+  layout(1, S.frame === 1);
+
+  const r = stage.getBoundingClientRect();
+  const fit = Math.min(r.width / w, r.height / h);
+  stage.classList.add("rec");
+  canvas.style.width = Math.round(w * fit) + "px";
+  canvas.style.height = Math.round(h * fit) + "px";
+  render(recording);
+  return { w, h };
+}
+
+function endRecordFrame() {
+  recording = null;
+  stage.classList.remove("rec");
+  canvas.style.width = canvas.style.height = "";
+  resize();
+  render();
+}
+
 function toggleRecord() {
   const btns = [document.getElementById("btnRec"), document.getElementById("recBtn")].filter(Boolean);
   if (recorder && recorder.state === "recording") { recorder.stop(); return; }
@@ -1698,10 +1788,12 @@ function toggleRecord() {
     return;
   }
 
+  const dims = beginRecordFrame();
   const stream = canvas.captureStream(60);
   const made = makeRecorder(stream);
   if (!made) {
     stream.getTracks().forEach(t => t.stop());
+    endRecordFrame();
     note("No video encoder available in this browser.");
     return;
   }
@@ -1711,13 +1803,17 @@ function toggleRecord() {
   rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
   rec.onstop = () => {
     stream.getTracks().forEach(tr => tr.stop());
+    endRecordFrame();
     const blob = new Blob(chunks, { type: t.ext === "mp4" ? "video/mp4" : "video/webm" });
-    download(blob, `bypixel-${stamp()}.${t.ext}`);
-    note(`${t.label} · ${canvas.width}×${canvas.height} · ${Math.round(blob.size / 1048576)} MB`);
+    if (!blob.size) { note("Recording came back empty — keep this tab in front while recording."); }
+    else {
+      download(blob, `bypixel-${stamp()}.${t.ext}`);
+      note(`${t.label} · ${dims.w}×${dims.h} · ${(blob.size / 1048576).toFixed(1)} MB`);
+    }
     btns.forEach(b => { b.dataset.on = "false"; b.textContent = b.dataset.label || "Record"; });
   };
-  rec.start();
-  note(`Recording · ${t.label}`);
+  rec.start(500);
+  note(`Recording · ${t.label} · ${dims.w}×${dims.h}`);
   btns.forEach(b => { b.dataset.on = "true"; b.textContent = "Stop & save"; });
 }
 document.getElementById("btnRec").onclick = toggleRecord;
