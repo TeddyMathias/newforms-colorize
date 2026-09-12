@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Bypixel 2.0 — Colorizer</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -50,7 +50,7 @@
       </div>
     </main>
 
-    <aside class="panel" id="panel"></aside>
+    <aside class="panel" id="panel"><div class="grab" id="grab"><span></span></div></aside>
   </div>
 </div>
 
@@ -135,6 +135,7 @@ const S = {
   panX: 0, panY: 0,   // image px
   autofit: true,
   mirror: true,
+  facing: "user",    // which camera: user = front, environment = back
   exportScale: 2,
   frame: 1,          // 0 = what the viewport shows, 1 = the source's own size
   behind: 0,         // 0 = alpha, 1 = black, 2 = workspace grey
@@ -147,6 +148,10 @@ const S = {
   seed: Math.random() * 100,
   time: 0
 };
+
+/* one breakpoint, shared by the stylesheet and the behaviour below */
+const mq = window.matchMedia("(max-width: 860px)");
+function isPhone() { return mq.matches; }
 
 const RIPPLE_MAX = 10;
 const ripples = [];           // {x, y, t, w}  — x/y in image pixels
@@ -541,23 +546,46 @@ window.addEventListener("paste", e => {
 ["dragover", "drop"].forEach(t =>
   window.addEventListener(t, e => { if (!stage.contains(e.target)) e.preventDefault(); }));
 
-async function startCam() {
+async function getCam(facing) {
+  const size = { width: { ideal: 1920 }, height: { ideal: 1080 } };
   try {
-    camStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+    // ask for the side we want, but never fail just because a machine
+    // only has the one camera
+    return await navigator.mediaDevices.getUserMedia({
+      video: Object.assign({ facingMode: { ideal: facing } }, size), audio: false
     });
+  } catch (err) {
+    return await navigator.mediaDevices.getUserMedia({ video: size, audio: false });
+  }
+}
+
+async function startCam(facing) {
+  facing = facing || S.facing;
+  try {
+    const next = await getCam(facing);
+    if (camStream) camStream.getTracks().forEach(t => t.stop());
+    camStream = next;
+    S.facing = facing;
     video.srcObject = camStream;
     await video.play();
     camOn = true;
     hasSource = true;
     emptyEl.hidden = true;
-    docName.textContent = "webcam";
+    docName.textContent = facing === "environment" ? "camera · back" : "camera · front";
+    S.mirror = facing !== "environment";      // only a selfie should be mirrored
     S.autofit = true; S.zoom = 1; S.panX = 0; S.panY = 0;
-    syncChrome();
+    closeSheet();
+    syncPanel();
   } catch (err) {
     console.warn(err);
-    alert("Could not open the webcam. Check the camera permission for this page.\n(Live Server / https / localhost only.)");
+    note("Camera blocked. Allow it for this page — needs https or localhost.");
   }
+}
+
+function flipCam() {
+  const next = S.facing === "user" ? "environment" : "user";
+  if (camOn) startCam(next);
+  else { S.facing = next; syncPanel(); }
 }
 function stopCam() {
   if (camStream) camStream.getTracks().forEach(t => t.stop());
@@ -565,6 +593,7 @@ function stopCam() {
   syncChrome();
 }
 function toggleCam() { camOn ? stopCam() : startCam(); }
+function camActive() { return camOn; }
 document.getElementById("btnCam").onclick = toggleCam;
 document.getElementById("emptyCam").onclick = toggleCam;
 
@@ -983,12 +1012,14 @@ function updateHUD() {
   const v = views[0];
   const z = v ? Math.round(viewScale(v) / dpr * 100) : 100;
   document.getElementById("zVal").textContent = z + "%";
-  document.getElementById("hud").innerHTML =
-    `${texW} × ${texH} <i>/</i> ${S.screens} screen${S.screens > 1 ? "s" : ""}` +
-    ` <i>/</i> ${S.palette.length} colors` +
-    (shapes.length ? ` <i>/</i> ${shapes.length} shapes` : "") +
-    ` <i>/</i> ${fps} fps` +
-    (camOn ? ` <i>/</i> live` : "");
+  document.getElementById("hud").innerHTML = isPhone()
+    ? `${texW} × ${texH}` + (camOn ? ` <i>/</i> live` : "") +
+      (S.screens > 1 ? ` <i>/</i> ${S.screens}` : "")
+    : `${texW} × ${texH} <i>/</i> ${S.screens} screen${S.screens > 1 ? "s" : ""}` +
+      ` <i>/</i> ${S.palette.length} colors` +
+      (shapes.length ? ` <i>/</i> ${shapes.length} shapes` : "") +
+      ` <i>/</i> ${fps} fps` +
+      (camOn ? ` <i>/</i> live` : "");
 }
 
 /* ---------------------------------------------------------------
@@ -1050,6 +1081,11 @@ let dragging = null;
 
 canvas.addEventListener("pointerdown", e => {
   if (!hasSource) return;
+  if (document.body.classList.contains("sheet")) {   // first tap just dismisses
+    closeSheet();
+    return;
+  }
+  if (touches.size >= 2) return;                     // pinching, not drawing
   try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
   const v = viewAt(e.clientX, e.clientY);
   const q = screenToImage(e.clientX, e.clientY, v);
@@ -1076,6 +1112,7 @@ canvas.addEventListener("pointerdown", e => {
 });
 
 canvas.addEventListener("pointermove", e => {
+  if (touches.size >= 2) return;
   if (dragging) {
     const sc = viewScale(dragging.v);
     S.panX = dragging.panX + (e.clientX - dragging.x) * dragging.ratio / sc;
@@ -1167,6 +1204,8 @@ const I = {
   fit:   '<path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>',
   cam:   '<rect x="1.5" y="4" width="9" height="8" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M10.5 8l4-2.5v5L10.5 8z" fill="currentColor"/>',
   import:'<path d="M8 2v8m0 0L5 7m3 3l3-3M2.5 12.5h11" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>',
+  sheet: '<path d="M2 4.5h12M2 8h12M2 11.5h12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" fill="none"/><circle cx="5.5" cy="4.5" r="1.7" fill="currentColor"/><circle cx="10.5" cy="8" r="1.7" fill="currentColor"/><circle cx="6.5" cy="11.5" r="1.7" fill="currentColor"/>',
+  flip:  '<rect x="1.5" y="4" width="13" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M6 8.5a2 2 0 013.5-1.3M10 8.5a2 2 0 01-3.5 1.3" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/><path d="M9.2 6.1l.5 1.2-1.3.2M6.8 10.9l-.5-1.2 1.3-.2" fill="currentColor"/>',
   draw:  '<path d="M2 14l1-3.2 7.4-7.4a1.6 1.6 0 012.2 2.2L5.2 13 2 14z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M9.4 4.4l2.2 2.2" stroke="currentColor" stroke-width="1.3"/>'
 };
 const svg = d => `<svg viewBox="0 0 16 16">${d}</svg>`;
@@ -1199,6 +1238,21 @@ rail.appendChild(document.createElement("hr"));
   const b = document.createElement("button");
   b.className = "tool";
   b.dataset.tip = tip;
+  b.dataset.act = id;
+  b.innerHTML = svg(I[id]);
+  b.onclick = fn;
+  rail.appendChild(b);
+});
+
+/* Two buttons only the phone layout shows: flip the camera, and pull the
+   controls up. They sit in the rail so the bar is the one thing to learn. */
+[["flip", "Switch camera", () => flipCam(), "flip"],
+ ["sheet", "Controls", () => toggleSheet(), "sheet"]
+].forEach(([id, tip, fn, mob]) => {
+  const b = document.createElement("button");
+  b.className = "tool m-only";
+  b.dataset.tip = tip;
+  b.dataset.mob = mob;
   b.innerHTML = svg(I[id]);
   b.onclick = fn;
   rail.appendChild(b);
@@ -1235,6 +1289,9 @@ const SPEC = [
       ["Freeze frame", () => freezeCam(), "freezeBtn"],
       ["Fit to screen", () => fitView()]
     ]},
+    { t: "seg", k: "facing", label: "Camera",
+      opts: [["user", "Front"], ["environment", "Back"]],
+      after: () => { if (camOn) startCam(S.facing); } },
     { t: "toggle", k: "mirror", label: "Mirror cam" },
     { t: "hint", html: "Drop a file anywhere on the canvas, or paste one with <kbd>⌘V</kbd>." }
   ]},
@@ -1479,6 +1536,10 @@ function syncChrome() {
   if (topCam) topCam.textContent = camOn ? "Stop cam" : "Webcam";
   const fz = document.getElementById("freezeBtn");
   if (fz) fz.disabled = !camOn;
+  const flip = rail.querySelector('[data-mob="flip"]');
+  if (flip) flip.hidden = !camOn;
+  const camTool = rail.querySelector('[data-act="cam"]');
+  if (camTool) camTool.setAttribute("aria-pressed", camOn);
 }
 
 /* palette UI ---------------------------------------------------- */
@@ -1554,6 +1615,100 @@ function shufflePalette() {
 buildPalette();
 buildPresets();
 syncPanel();
+
+/* ---------------------------------------------------------------
+   8b. PHONE — the panel becomes a sheet you pull up and flick away,
+       and two fingers pinch the artwork.
+   --------------------------------------------------------------- */
+
+const grab = document.getElementById("grab");
+
+function openSheet() {
+  if (!isPhone()) return;
+  document.body.classList.add("sheet");
+}
+function closeSheet() { document.body.classList.remove("sheet"); }
+function toggleSheet() {
+  document.body.classList.contains("sheet") ? closeSheet() : openSheet();
+}
+
+/* drag the handle down to dismiss; a tap on it does the same */
+let sheetDrag = null;
+grab.addEventListener("pointerdown", e => {
+  grab.setPointerCapture(e.pointerId);
+  sheetDrag = { y: e.clientY, t: performance.now() };
+  panel.style.transition = "none";
+});
+grab.addEventListener("pointermove", e => {
+  if (!sheetDrag) return;
+  panel.style.transform = `translateY(${Math.max(0, e.clientY - sheetDrag.y)}px)`;
+});
+function endSheetDrag(e) {
+  if (!sheetDrag) return;
+  const dy = Math.max(0, e.clientY - sheetDrag.y);
+  const quick = performance.now() - sheetDrag.t < 260;
+  panel.style.transition = "";
+  panel.style.transform = "";
+  if (dy > 110 || (quick && dy > 26) || (quick && dy < 6)) closeSheet();
+  sheetDrag = null;
+}
+grab.addEventListener("pointerup", endSheetDrag);
+grab.addEventListener("pointercancel", endSheetDrag);
+
+/* picking up a tool means you want the canvas, so the sheet gets out of the way */
+const railTap = () => { if (isPhone()) closeSheet(); };
+rail.querySelectorAll('.tool[data-tool], .tool[data-act]').forEach(b =>
+  b.addEventListener("click", railTap));
+
+/* two fingers: pinch to zoom, drag to pan */
+const touches = new Map();
+let pinch = null;
+
+function pinchNow() {
+  const [a, b] = [...touches.values()];
+  return { d: Math.max(1, Math.hypot(a[0] - b[0], a[1] - b[1])),
+           cx: (a[0] + b[0]) / 2, cy: (a[1] + b[1]) / 2 };
+}
+
+canvas.addEventListener("pointerdown", e => {
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (touches.size === 2) {                 // a second finger cancels whatever one was doing
+    pressPt = null; stroke = null; dragging = null;
+    ictx.clearRect(0, 0, ink.width, ink.height);
+    stage.classList.remove("dragging");
+    S.autofit = false;
+    pinch = pinchNow();
+  }
+}, true);
+
+canvas.addEventListener("pointermove", e => {
+  if (!touches.has(e.pointerId)) return;
+  touches.set(e.pointerId, [e.clientX, e.clientY]);
+  if (touches.size < 2 || !pinch) return;
+  const now = pinchNow();
+  const v = views[0];
+  const sc = viewScale(v);
+  const ratio = canvasPoint(e.clientX, e.clientY)[2];
+  S.zoom = Math.min(40, Math.max(0.05, S.zoom * (now.d / pinch.d)));
+  S.panX += (now.cx - pinch.cx) * ratio / sc;
+  S.panY -= (now.cy - pinch.cy) * ratio / sc;
+  pinch = now;
+}, true);
+
+["pointerup", "pointercancel", "pointerleave"].forEach(t =>
+  canvas.addEventListener(t, e => {
+    touches.delete(e.pointerId);
+    if (touches.size < 2) pinch = null;
+  }, true));
+
+/* start the phone layout tidy: everything folded, sheet down */
+function applyPhoneDefaults() {
+  if (!isPhone()) return;
+  panel.querySelectorAll(".sec").forEach(d => { d.open = false; });
+  closeSheet();
+}
+mq.addEventListener("change", () => { applyPhoneDefaults(); resize(); });
+applyPhoneDefaults();
 
 /* ---------------------------------------------------------------
    9. CAPTURE
